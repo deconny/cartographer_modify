@@ -1,0 +1,5 @@
+string mode
+string map_filename
+---
+bool success
+string message

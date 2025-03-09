@@ -22,6 +22,7 @@
 #include "cartographer_ros_msgs/srv/switch_mode.hpp"
 #include "gflags/gflags.h"
 #include "tf2_ros/transform_listener.h"
+#include <filesystem>
 
 DEFINE_bool(collect_metrics, false,
             "Activates the collection of runtime metrics. If activated, the "
@@ -84,7 +85,11 @@ class CartographerNode : public rclcpp::Node {
 CartographerNode::CartographerNode()
     : Node("cartographer_ros_node"),
       kTfBufferCacheTimeInSeconds_(10.),
-      current_mode_("mapping") {}
+      current_mode_("mapping") {
+  tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
+  tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+
+}
 
 CartographerNode::~CartographerNode() {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -114,6 +119,9 @@ void CartographerNode::createNode(const std::string& mode) {
   } else if (mode == "localization") {
     std::tie(node_options_, trajectory_options_) = LoadOptions(
         FLAGS_configuration_directory, localization_configuration_basename_);
+  } else {
+    RCLCPP_ERROR(this->get_logger(), "Invalid mode: %s", mode.c_str());
+    throw std::invalid_argument("Invalid mode specified");
   }
   auto map_builder =
       cartographer::common::make_unique<cartographer::mapping::MapBuilder>(
@@ -124,8 +132,12 @@ void CartographerNode::createNode(const std::string& mode) {
 
 void CartographerNode::stopNode() {
   if (node_) {
-    node_->FinishAllTrajectories();
-    node_->RunFinalOptimization();
+    try {
+      node_->FinishAllTrajectories();
+      node_->RunFinalOptimization();
+    } catch (const std::exception& e) {
+      RCLCPP_ERROR(this->get_logger(), "Error when stopping node: %s", e.what());
+    }
     node_.reset();
   }
 }
@@ -146,8 +158,16 @@ bool CartographerNode::startLocalizationMode(const std::string& map_filename) {
     RCLCPP_ERROR(this->get_logger(), "Map filename is empty");
     return false;
   }
+
+  if (!std::filesystem::exists(map_filename)) {
+    RCLCPP_ERROR(this->get_logger(), "Map file '%s' does not exist.", map_filename.c_str());
+    return false;
+  }
+
+  RCLCPP_INFO(this->get_logger(), "Switching to Localization mode using map '%s'.", map_filename.c_str());
   stopNode();
   createNode("localization");
+
   try {
     node_->LoadState(map_filename, FLAGS_load_frozen_state);
     RCLCPP_INFO(this->get_logger(), "Successfully loaded state from '%s'.",
@@ -161,7 +181,6 @@ bool CartographerNode::startLocalizationMode(const std::string& map_filename) {
                  e.what());
     return false;
   }
-  return true;
 }
 
 void CartographerNode::switchModeCallback(
@@ -213,6 +232,8 @@ int main(int argc, char** argv) {
       << "-configuration_directory is missing.";
   CHECK(!FLAGS_mapping_configuration_basename.empty())
       << "-configuration_basename is missing.";
+  CHECK(!FLAGS_localization_configuration_basename.empty())
+      << "-localization_configuration_basename is missing.";  
 
   cartographer_ros::ScopedRosLogSink ros_log_sink;
   auto cartographer_ros_node =
